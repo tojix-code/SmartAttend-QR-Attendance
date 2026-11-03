@@ -31,34 +31,50 @@ export default function TeacherDashboard() {
   const [students, setStudents] = useState([]);
 
   useEffect(() => {
-    attendanceService.getStudents()
+    attendanceService.getStudents({ includeAvatars: false })
       .then(setStudents)
       .catch(error => toast.error('Student roster could not be loaded', error.message));
   }, [toast]);
 
-  const totalStudents = students.length;
-  const totalClasses = sessions.length;
-
-  // Filter today's attendance records
-  const todayRecords = useMemo(() => {
-    const today = new Date().toDateString();
-    return attendanceRecords.filter(r => new Date(r.marked_at).toDateString() === today);
-  }, [attendanceRecords]);
-
-  // Unique present students today
-  const presentStudentsCount = useMemo(() => {
-    const set = new Set();
-    todayRecords.forEach(r => {
-      if (r.roll_number) set.add(r.roll_number);
-      else if (r.student_id) set.add(r.student_id);
-    });
-    return set.size;
-  }, [todayRecords]);
-
-  const absentStudentsCount = Math.max(0, totalStudents - presentStudentsCount);
-  const attendanceRate = totalStudents > 0 ? Math.round((presentStudentsCount / totalStudents) * 100) : 0;
-
   const analytics = useMemo(() => {
+    const studentsByGroup = new Map();
+    students.forEach(student => {
+      const key = `${student.class_name}\u0000${student.section}`;
+      const group = studentsByGroup.get(key) || {
+        className: student.class_name,
+        section: student.section,
+        studentIds: new Set()
+      };
+      group.studentIds.add(student.id);
+      studentsByGroup.set(key, group);
+    });
+
+    const sessionMetrics = sessions.map(session => {
+      const key = `${session.class_name}\u0000${session.section}`;
+      const group = studentsByGroup.get(key);
+      const records = attendanceRecords.filter(record => record.session_id === session.id);
+      const present = records.filter(record => !record.revoked_at && record.status !== 'revoked').length;
+      return {
+        ...session,
+        expected: group?.studentIds.size || 0,
+        present,
+        missed: Math.max((group?.studentIds.size || 0) - present, 0)
+      };
+    });
+
+    const today = new Date().toDateString();
+    const todaySessions = sessionMetrics.filter(session => new Date(session.created_at).toDateString() === today);
+    const todayExpected = todaySessions.reduce((total, session) => total + session.expected, 0);
+    const todayPresent = todaySessions.reduce((total, session) => total + session.present, 0);
+    const allExpected = sessionMetrics.reduce((total, session) => total + session.expected, 0);
+    const allPresent = sessionMetrics.reduce((total, session) => total + session.present, 0);
+    const studentsInTaughtGroups = new Set(
+      sessionMetrics.flatMap(session => {
+        const group = studentsByGroup.get(`${session.class_name}\u0000${session.section}`);
+        return group ? [...group.studentIds] : [];
+      })
+    );
+
     const dates = Array.from({ length: 7 }, (_, index) => {
       const date = new Date();
       date.setDate(date.getDate() - (6 - index));
@@ -66,38 +82,82 @@ export default function TeacherDashboard() {
     });
 
     const weeklyData = dates.map(date => {
-      const daySessions = sessions.filter(session =>
+      const daySessions = sessionMetrics.filter(session =>
         new Date(session.created_at).toDateString() === date.toDateString()
       );
-      const expected = daySessions.reduce((total, session) => total + students.filter(student =>
-        student.class_name === session.class_name && student.section === session.section
-      ).length, 0);
-      const sessionIds = new Set(daySessions.map(session => session.id));
-      const present = attendanceRecords.filter(record => sessionIds.has(record.session_id)).length;
+      const expected = daySessions.reduce((total, session) => total + session.expected, 0);
+      const present = daySessions.reduce((total, session) => total + session.present, 0);
       return {
         day: date.toLocaleDateString(undefined, { weekday: 'short' }),
         attendanceRate: expected ? Math.round((present / expected) * 100) : 0,
+        expected,
+        present,
         hasSessions: expected > 0
       };
     }).filter(day => day.hasSessions);
 
     const subjects = new Map();
-    sessions.forEach(session => {
-      const expected = students.filter(student =>
-        student.class_name === session.class_name && student.section === session.section
-      ).length;
-      if (!expected) return;
-      const current = subjects.get(session.subject) || { subject: session.subject, present: 0, expected: 0 };
-      current.expected += expected;
-      current.present += attendanceRecords.filter(record => record.session_id === session.id).length;
+    const classes = new Map();
+    sessionMetrics.forEach(session => {
+      const current = subjects.get(session.subject) || { subject: session.subject, present: 0, expected: 0, sessions: 0 };
+      current.expected += session.expected;
+      current.present += session.present;
+      current.sessions += 1;
       subjects.set(session.subject, current);
+
+      const classKey = `${session.class_name}\u0000${session.section}`;
+      const classStats = classes.get(classKey) || {
+        className: session.class_name,
+        section: session.section,
+        present: 0,
+        expected: 0,
+        sessions: 0
+      };
+      classStats.present += session.present;
+      classStats.expected += session.expected;
+      classStats.sessions += 1;
+      classes.set(classKey, classStats);
     });
-    const subjectData = Array.from(subjects.values()).map(subject => ({
+    const subjectData = Array.from(subjects.values()).filter(subject => subject.expected > 0).map(subject => ({
       subject: subject.subject,
-      attendance: Math.round((subject.present / subject.expected) * 100)
+      attendance: Math.round((subject.present / subject.expected) * 100),
+      present: subject.present,
+      expected: subject.expected,
+      sessions: subject.sessions
     }));
-    return { weeklyData, subjectData };
+
+    const classData = Array.from(classes.values())
+      .filter(group => group.expected > 0)
+      .map(group => ({
+        ...group,
+        attendance: Math.round((group.present / group.expected) * 100),
+        missed: Math.max(group.expected - group.present, 0)
+      }))
+      .sort((a, b) => a.attendance - b.attendance);
+
+    return {
+      weeklyData,
+      subjectData,
+      classData,
+      sessionMetrics,
+      totalStudents: studentsInTaughtGroups.size,
+      totalClasses: sessions.length,
+      todayExpected,
+      todayPresent,
+      todayMissed: Math.max(todayExpected - todayPresent, 0),
+      todayRate: todayExpected ? Math.round((todayPresent / todayExpected) * 100) : 0,
+      overallRate: allExpected ? Math.round((allPresent / allExpected) * 100) : 0,
+      overallExpected: allExpected,
+      overallPresent: allPresent,
+      taughtGroups: classData.length
+    };
   }, [sessions, students, attendanceRecords]);
+
+  const totalStudents = analytics.totalStudents;
+  const totalClasses = analytics.totalClasses;
+  const presentStudentsCount = analytics.todayPresent;
+  const absentStudentsCount = analytics.todayMissed;
+  const attendanceRate = analytics.todayRate;
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -192,8 +252,8 @@ export default function TeacherDashboard() {
 
         <StatCard
           title="Today's Attendance"
-          value={`${attendanceRate}%`}
-          subtitle="Average turnout"
+          value={analytics.todayExpected ? `${attendanceRate}%` : 'No sessions'}
+          subtitle={`Overall session rate: ${analytics.overallRate}%`}
           icon={Percent}
           color="emerald"
         />
@@ -227,6 +287,58 @@ export default function TeacherDashboard() {
       <div>
         <AttendanceChart weeklyData={analytics.weeklyData} subjectData={analytics.subjectData} />
       </div>
+
+      <section className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-bold text-slate-900">Detailed class analytics</h2>
+            <p className="text-xs text-slate-500">
+              {analytics.overallPresent} verified check-ins across {analytics.overallExpected} expected seats and {analytics.taughtGroups} class groups.
+            </p>
+          </div>
+          {analytics.classData.length > 0 && (
+            <div className="text-xs text-slate-500">
+              Highest: <span className="font-semibold text-emerald-700">{analytics.classData[analytics.classData.length - 1].className} ({analytics.classData[analytics.classData.length - 1].section})</span>
+              <span className="mx-2">·</span>
+              Needs attention: <span className="font-semibold text-amber-700">{analytics.classData[0].className} ({analytics.classData[0].section})</span>
+            </div>
+          )}
+        </div>
+
+        <div className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-card">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-xs">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-5 py-3">Class / Section</th>
+                  <th className="px-5 py-3">Sessions</th>
+                  <th className="px-5 py-3">Verified</th>
+                  <th className="px-5 py-3">Missed</th>
+                  <th className="px-5 py-3">Attendance rate</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {analytics.classData.map(group => (
+                  <tr key={`${group.className}-${group.section}`}>
+                    <td className="px-5 py-3 font-semibold text-slate-800">{group.className} ({group.section})</td>
+                    <td className="px-5 py-3 text-slate-600">{group.sessions}</td>
+                    <td className="px-5 py-3 text-emerald-700">{group.present} / {group.expected}</td>
+                    <td className="px-5 py-3 text-rose-700">{group.missed}</td>
+                    <td className="px-5 py-3 font-bold text-slate-900">{group.attendance}%</td>
+                  </tr>
+                ))}
+                {analytics.classData.length === 0 && (
+                  <tr>
+                    <td colSpan="5" className="px-5 py-8 text-center text-slate-400">
+                      Class analytics will appear after students are registered and sessions are created.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
 
       {/* Bottom Grid: Recent Activity & Recent Sessions */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

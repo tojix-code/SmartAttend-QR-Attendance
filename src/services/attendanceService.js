@@ -169,7 +169,6 @@ export const attendanceService = {
     const expiresAt = new Date(now.getTime() + durationMinutes * 60000).toISOString();
 
     const newSession = {
-      id: isSupabaseConfigured() ? undefined : `sess-${Date.now()}`,
       session_token: token,
       class_name: className,
       subject,
@@ -193,6 +192,7 @@ export const attendanceService = {
     }
 
     requireDemoMode();
+    newSession.id = `sess-${Date.now()}`;
     const sessions = getLocalData(STORAGE_KEYS.SESSIONS, DEMO_SESSIONS);
     sessions.unshift(newSession);
     setLocalData(STORAGE_KEYS.SESSIONS, sessions);
@@ -343,6 +343,7 @@ export const attendanceService = {
           id,
           marked_at,
           status,
+          revoked_at,
           device_info,
           student:students (
             id,
@@ -365,7 +366,8 @@ export const attendanceService = {
         section: item.student?.section,
         avatar: await getAvatarUrl(item.student?.avatar_url),
         marked_at: item.marked_at,
-        status: item.status,
+        status: item.revoked_at ? 'revoked' : item.status,
+        revoked_at: item.revoked_at,
         device_info: item.device_info
       })));
     }
@@ -373,6 +375,32 @@ export const attendanceService = {
     requireDemoMode();
     const records = getLocalData(STORAGE_KEYS.ATTENDANCE, DEMO_ATTENDANCE);
     return records.filter(r => r.session_id === sessionId);
+  },
+
+  revokeSessionAttendance: async (attendanceId) => {
+    if (isSupabaseConfigured() && supabase) {
+      const { data, error } = await supabase.rpc('revoke_session_attendance', {
+        p_attendance_id: attendanceId
+      });
+      if (error) throw error;
+      if (!data?.success) throw new Error(data?.message || 'Attendance could not be revoked.');
+      return data;
+    }
+
+    requireDemoMode();
+    const records = getLocalData(STORAGE_KEYS.ATTENDANCE, DEMO_ATTENDANCE);
+    const record = records.find(item => item.id === attendanceId);
+    const sessions = getLocalData(STORAGE_KEYS.SESSIONS, DEMO_SESSIONS);
+    const session = record && sessions.find(item => item.id === record.session_id);
+    if (!record || !session) throw new Error('Attendance record not found.');
+    if (!session.is_active || new Date(session.expires_at) <= new Date()) {
+      throw new Error('Attendance can only be revoked while its QR session is active.');
+    }
+    if (record.revoked_at) throw new Error('This attendance has already been revoked.');
+    record.revoked_at = new Date().toISOString();
+    record.status = 'revoked';
+    setLocalData(STORAGE_KEYS.ATTENDANCE, records);
+    return { success: true, message: 'Attendance revoked. The student cannot use this session QR to check in again.' };
   },
 
   /**
@@ -388,6 +416,7 @@ export const attendanceService = {
           id,
           marked_at,
           status,
+          revoked_at,
           device_info,
           student:students (
             id,
@@ -412,6 +441,7 @@ export const attendanceService = {
       if (error) throw error;
       records = await Promise.all(data.map(async item => ({
         id: item.id,
+        session_id: item.session?.id,
         student_id: item.student?.id,
         student_name: item.student?.full_name,
         roll_number: item.student?.roll_number,
@@ -421,7 +451,8 @@ export const attendanceService = {
         subject: item.session?.subject,
         teacher_name: item.session?.teacher?.full_name,
         marked_at: item.marked_at,
-        status: item.status,
+        status: item.revoked_at ? 'revoked' : item.status,
+        revoked_at: item.revoked_at,
         device_info: item.device_info
       })));
     } else {
@@ -483,20 +514,49 @@ export const attendanceService = {
     const records = getLocalData(STORAGE_KEYS.ATTENDANCE, DEMO_ATTENDANCE);
     const classesAttended = new Set(
       records
-        .filter(record => record.student_id === student.id && finishedSessions.some(session => session.id === record.session_id))
+        .filter(record => record.student_id === student.id && !record.revoked_at && record.status !== 'revoked' && finishedSessions.some(session => session.id === record.session_id))
         .map(record => record.session_id)
     ).size;
+    const subjectMap = new Map();
+    finishedSessions.forEach(session => {
+        const stats = subjectMap.get(session.subject) || { subject: session.subject, total_sessions: 0, classes_attended: 0 };
+        stats.total_sessions += 1;
+        const attended = records.some(record =>
+          record.student_id === student.id &&
+          record.session_id === session.id &&
+          !record.revoked_at &&
+          record.status !== 'revoked'
+        );
+        if (attended) stats.classes_attended += 1;
+        subjectMap.set(session.subject, stats);
+    });
+    const monthlyMap = new Map();
+    finishedSessions.forEach(session => {
+        const month = session.created_at.slice(0, 7);
+        const stats = monthlyMap.get(month) || { month, total_sessions: 0, classes_attended: 0 };
+        stats.total_sessions += 1;
+        const attended = records.some(record =>
+          record.student_id === student.id &&
+          record.session_id === session.id &&
+          !record.revoked_at &&
+          record.status !== 'revoked'
+        );
+        if (attended) stats.classes_attended += 1;
+        monthlyMap.set(month, stats);
+    });
     return {
-      total_sessions: finishedSessions.length,
-      classes_attended: classesAttended,
-      classes_missed: Math.max(finishedSessions.length - classesAttended, 0)
+        total_sessions: finishedSessions.length,
+        classes_attended: classesAttended,
+        classes_missed: Math.max(finishedSessions.length - classesAttended, 0),
+        subject_stats: [...subjectMap.values()],
+        monthly_trend: [...monthlyMap.values()].sort((a, b) => a.month.localeCompare(b.month))
     };
   },
 
   /**
    * Get list of all registered students
    */
-  getStudents: async ({ includeEmail = false } = {}) => {
+  getStudents: async ({ includeEmail = false, includeAvatars = true } = {}) => {
     if (isSupabaseConfigured() && supabase) {
       const { data, error } = await supabase
         .from('students')
@@ -507,7 +567,7 @@ export const attendanceService = {
       if (error) throw error;
       return Promise.all(data.map(async student => ({
         ...student,
-        avatar: await getAvatarUrl(student.avatar_url)
+        avatar: includeAvatars ? await getAvatarUrl(student.avatar_url) : null
       })));
     }
 

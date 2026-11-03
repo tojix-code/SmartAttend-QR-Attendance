@@ -1,10 +1,16 @@
 import React from 'react';
-import { Users, Clock, Smartphone, CheckCircle, ShieldCheck } from 'lucide-react';
+import { Users, Smartphone, ShieldCheck, Ban } from 'lucide-react';
 import Badge from '../common/Badge';
 import { formatTime } from '../../utils/formatters';
 
-export default function LiveAttendanceFeed({ records = [], totalStudents = 5 }) {
-  const attendanceRate = totalStudents > 0 ? Math.round((records.length / totalStudents) * 100) : 0;
+export default function LiveAttendanceFeed({
+  records = [],
+  totalStudents = 0,
+  sessionActive = false,
+  onRevoke
+}) {
+  const presentCount = records.filter(record => !record.revoked_at && record.status !== 'revoked').length;
+  const attendanceRate = totalStudents > 0 ? Math.round((presentCount / totalStudents) * 100) : 0;
 
   return (
     <div className="bg-white rounded-3xl border border-slate-200/90 p-6 shadow-card h-full flex flex-col">
@@ -20,7 +26,7 @@ export default function LiveAttendanceFeed({ records = [], totalStudents = 5 }) 
 
         <div className="text-right">
           <span className="text-xl font-extrabold text-slate-900">
-            {records.length}
+            {presentCount}
             <span className="text-xs font-medium text-slate-400">/{totalStudents}</span>
           </span>
           <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">
@@ -70,13 +76,26 @@ export default function LiveAttendanceFeed({ records = [], totalStudents = 5 }) 
                 </div>
               </div>
 
-              <div className="text-right shrink-0 pl-2">
-                <Badge variant="success" size="sm" dot={true}>
-                  Verified
-                </Badge>
-                <div className="text-[10px] text-slate-400 font-mono mt-1">
-                  {formatTime(record.marked_at)}
+              <div className="flex items-center gap-2 shrink-0 pl-2">
+                <div className="text-right">
+                  <Badge variant={record.revoked_at || record.status === 'revoked' ? 'danger' : 'success'} size="sm" dot={true}>
+                    {record.revoked_at || record.status === 'revoked' ? 'Revoked' : 'Verified'}
+                  </Badge>
+                  <div className="text-[10px] text-slate-400 font-mono mt-1">
+                    {formatTime(record.marked_at)}
+                  </div>
                 </div>
+                {sessionActive && !record.revoked_at && record.status !== 'revoked' && onRevoke && (
+                  <button
+                    type="button"
+                    onClick={() => onRevoke(record)}
+                    title={`Revoke attendance for ${record.student_name || 'student'}`}
+                    aria-label={`Revoke attendance for ${record.student_name || 'student'}`}
+                    className="rounded-lg border border-rose-200 p-2 text-rose-600 hover:bg-rose-50"
+                  >
+                    <Ban className="h-4 w-4" />
+                  </button>
+                )}
               </div>
             </div>
           ))

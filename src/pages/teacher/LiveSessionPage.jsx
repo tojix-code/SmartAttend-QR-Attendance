@@ -11,7 +11,7 @@ import Button from '../../components/common/Button';
 
 export default function LiveSessionPage() {
   const navigate = useNavigate();
-  const { activeSession, closeSession, sessions } = useAttendance();
+  const { activeSession, closeSession, revokeSessionAttendance, sessions } = useAttendance();
   const toast = useToast();
 
   const [sessionAttendees, setSessionAttendees] = useState([]);
@@ -53,7 +53,7 @@ export default function LiveSessionPage() {
   useEffect(() => {
     if (!selectedSession) return;
     let active = true;
-    attendanceService.getStudents()
+    attendanceService.getStudents({ includeAvatars: false })
       .then(students => {
         if (active) {
           setTotalStudents(students.filter(student =>
@@ -75,6 +75,22 @@ export default function LiveSessionPage() {
     setIsClosing(false);
     fetchAttendees();
   };
+
+  const handleRevokeAttendance = async (record) => {
+    const confirmed = window.confirm(
+      `Revoke attendance for ${record.student_name || 'this student'} (Roll #${record.roll_number || 'N/A'})? They will not be able to check in again using this session QR.`
+    );
+    if (!confirmed) return;
+
+    const result = await revokeSessionAttendance(record.id);
+    if (result.success) {
+      await fetchAttendees();
+    }
+  };
+
+  const isSelectedSessionActive = Boolean(
+    selectedSession?.is_active && new Date(selectedSession.expires_at) > new Date()
+  );
 
   if (!selectedSession) {
     return (
@@ -169,6 +185,8 @@ export default function LiveSessionPage() {
           <LiveAttendanceFeed
             records={sessionAttendees}
             totalStudents={totalStudents}
+            sessionActive={isSelectedSessionActive}
+            onRevoke={handleRevokeAttendance}
           />
         </div>
       </div>

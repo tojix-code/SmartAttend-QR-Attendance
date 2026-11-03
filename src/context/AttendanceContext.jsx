@@ -88,6 +88,21 @@ export function AttendanceProvider({ children }) {
     }
   };
 
+  const revokeSessionAttendance = async (attendanceId) => {
+    try {
+      await attendanceService.revokeSessionAttendance(attendanceId);
+      const allAtt = user?.role === 'student'
+        ? await attendanceService.getStudentAttendance(user.id, user.roll_number)
+        : await attendanceService.getAllAttendance();
+      setAttendanceRecords(allAtt);
+      toast.success('Attendance revoked', 'This check-in has been removed from the attendance count.');
+      return { success: true };
+    } catch (err) {
+      toast.error('Attendance could not be revoked', err.message);
+      return { success: false, error: err.message };
+    }
+  };
+
   /**
    * Student marks attendance using session token
    */
@@ -142,6 +157,7 @@ export function AttendanceProvider({ children }) {
         loading,
         createNewSession,
         closeSession,
+        revokeSessionAttendance,
         recordAttendance,
         refresh,
         resetDemoData: attendanceService.resetDemoData

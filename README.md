@@ -8,6 +8,8 @@ SmartAttend is a QR attendance app for schools and colleges. Teachers create exp
 - Admin-managed teacher and student accounts using temporary passwords.
 - Optional student profile photos stored in a private Supabase Storage bucket.
 - Teacher session creation, QR attendance, live feed, history, and CSV reports.
+- Student and teacher attendance analytics with subject, monthly, weekly, and class-group breakdowns.
+- Teachers can revoke a check-in while its QR session is active; the record remains auditable and duplicate scans stay blocked.
 - Server-side attendance validation, class matching, expiration checks, and duplicate prevention.
 - Campus-building landing-page background and responsive layouts.
 
@@ -66,6 +68,7 @@ Administrators can add teachers and students at `/admin/users`. Temporary passwo
 - The database checks the student's class/section, session state, and expiry, and the unique student/session constraint prevents concurrent duplicates.
 - Students can read only their own profile and attendance. Teachers are limited to their own sessions and the associated class roster. Admin privileges come from the protected `admins` table, not editable browser metadata.
 - Session tokens are not readable through student table queries. The attendance RPC validates submitted tokens without exposing the sessions table to students.
+- Teacher attendance revocation is handled by a database function that verifies session ownership and active expiry. Revoked check-ins remain recorded for audit purposes and do not count as attendance.
 - QR attendance can prevent duplicate or unauthorized account submissions, but a static QR can still be shared with another person during its validity window. Keep session lifetimes short and use in-person identity checks for high-stakes attendance.
 
 ## Demo mode

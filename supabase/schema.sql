@@ -64,9 +64,14 @@ create table if not exists public.attendance (
   session_id uuid not null references public.sessions(id) on delete cascade,
   marked_at timestamptz not null default now(),
   status text not null default 'present' check (status in ('present', 'late', 'absent')),
+  revoked_at timestamptz,
+  revoked_by uuid references auth.users(id) on delete set null,
   device_info text,
   constraint unique_student_session unique (student_id, session_id)
 );
+
+alter table public.attendance add column if not exists revoked_at timestamptz;
+alter table public.attendance add column if not exists revoked_by uuid references auth.users(id) on delete set null;
 
 create index if not exists idx_sessions_teacher_created
   on public.sessions (teacher_id, created_at desc);
@@ -144,6 +149,7 @@ drop policy if exists "Teachers read own profile" on public.teachers;
 drop policy if exists "Admins manage students" on public.students;
 drop policy if exists "Students read own profile" on public.students;
 drop policy if exists "Teachers read students in their classes" on public.students;
+drop policy if exists "Teachers read registered students" on public.students;
 drop policy if exists "Admins manage sessions" on public.sessions;
 drop policy if exists "Teachers manage own sessions" on public.sessions;
 drop policy if exists "Admins read all attendance" on public.attendance;
@@ -170,18 +176,9 @@ create policy "Admins manage students"
 create policy "Students read own profile"
   on public.students for select to authenticated
   using (user_id = auth.uid());
-create policy "Teachers read students in their classes"
+create policy "Teachers read registered students"
   on public.students for select to authenticated
-  using (
-    exists (
-      select 1
-      from public.sessions s
-      join public.teachers t on t.id = s.teacher_id
-      where t.user_id = auth.uid()
-        and s.class_name = students.class_name
-        and s.section = students.section
-    )
-  );
+  using (public.is_teacher());
 
 create policy "Admins manage sessions"
   on public.sessions for all to authenticated
@@ -299,6 +296,51 @@ $$;
 revoke all on function public.mark_qr_attendance(text, text) from public, anon;
 grant execute on function public.mark_qr_attendance(text, text) to authenticated;
 
+create or replace function public.revoke_session_attendance(p_attendance_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = pg_catalog, public, pg_temp
+as $$
+declare
+  v_session_active boolean;
+  v_expires_at timestamptz;
+begin
+  if auth.uid() is null then
+    raise exception 'Authentication required' using errcode = '28000';
+  end if;
+
+  select s.is_active, s.expires_at
+  into v_session_active, v_expires_at
+  from public.attendance a
+  join public.sessions s on s.id = a.session_id
+  join public.teachers t on t.id = s.teacher_id
+  where a.id = p_attendance_id
+    and t.user_id = auth.uid()
+  for update of a, s;
+
+  if not found then
+    return jsonb_build_object('success', false, 'message', 'Attendance record not found for your session.');
+  end if;
+  if not v_session_active or v_expires_at <= now() then
+    return jsonb_build_object('success', false, 'message', 'Attendance can only be revoked while its QR session is active.');
+  end if;
+
+  update public.attendance
+  set revoked_at = now(), revoked_by = auth.uid()
+  where id = p_attendance_id and revoked_at is null;
+
+  if not found then
+    return jsonb_build_object('success', false, 'message', 'This attendance has already been revoked.');
+  end if;
+
+  return jsonb_build_object('success', true, 'message', 'Attendance revoked. The student cannot use this session QR to check in again.');
+end;
+$$;
+
+revoke all on function public.revoke_session_attendance(uuid) from public, anon;
+grant execute on function public.revoke_session_attendance(uuid) to authenticated;
+
 create or replace function public.get_student_attendance_summary()
 returns jsonb
 language plpgsql
@@ -309,6 +351,8 @@ declare
   v_student public.students%rowtype;
   v_total integer;
   v_attended integer;
+  v_subject_stats jsonb;
+  v_monthly_trend jsonb;
 begin
   if auth.uid() is null then
     raise exception 'Authentication required' using errcode = '28000';
@@ -331,12 +375,64 @@ begin
   where a.student_id = v_student.id
     and s.class_name = v_student.class_name
     and s.section = v_student.section
-    and (s.expires_at <= now() or not s.is_active);
+    and (s.expires_at <= now() or not s.is_active)
+    and a.revoked_at is null;
+
+  select coalesce(
+    jsonb_agg(
+      jsonb_build_object(
+        'subject', stats.subject,
+        'total_sessions', stats.total_sessions,
+        'classes_attended', stats.classes_attended
+      ) order by stats.subject
+    ),
+    '[]'::jsonb
+  )
+  into v_subject_stats
+  from (
+    select s.subject,
+      count(*) as total_sessions,
+      count(a.id) filter (where a.id is not null and a.revoked_at is null) as classes_attended
+    from public.sessions s
+    left join public.attendance a
+      on a.session_id = s.id and a.student_id = v_student.id
+    where s.class_name = v_student.class_name
+      and s.section = v_student.section
+      and (s.expires_at <= now() or not s.is_active)
+    group by s.subject
+  ) stats;
+
+  select coalesce(
+    jsonb_agg(
+      jsonb_build_object(
+        'month', stats.month,
+        'total_sessions', stats.total_sessions,
+        'classes_attended', stats.classes_attended
+      ) order by stats.month
+    ),
+    '[]'::jsonb
+  )
+  into v_monthly_trend
+  from (
+    select to_char(date_trunc('month', s.created_at), 'YYYY-MM') as month,
+      count(*) as total_sessions,
+      count(a.id) filter (where a.id is not null and a.revoked_at is null) as classes_attended
+    from public.sessions s
+    left join public.attendance a
+      on a.session_id = s.id and a.student_id = v_student.id
+    where s.class_name = v_student.class_name
+      and s.section = v_student.section
+      and (s.expires_at <= now() or not s.is_active)
+      and s.created_at >= date_trunc('month', now()) - interval '5 months'
+    group by date_trunc('month', s.created_at)
+  ) stats;
 
   return jsonb_build_object(
     'total_sessions', v_total,
     'classes_attended', v_attended,
-    'classes_missed', greatest(v_total - v_attended, 0)
+    'classes_missed', greatest(v_total - v_attended, 0),
+    'subject_stats', v_subject_stats,
+    'monthly_trend', v_monthly_trend
   );
 end;
 $$;
@@ -368,7 +464,8 @@ begin
       jsonb_build_object(
         'id', a.id,
         'marked_at', a.marked_at,
-        'status', a.status,
+        'status', case when a.revoked_at is not null then 'revoked' else a.status end,
+        'revoked_at', a.revoked_at,
         'device_info', a.device_info,
         'subject', s.subject,
         'class_name', s.class_name,

@@ -42,7 +42,7 @@ export default function AttendanceChart({ weeklyData = [], subjectData = [] }) {
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
               <XAxis dataKey="day" stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} />
-              <YAxis domain={[60, 100]} stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
+              <YAxis domain={[0, 100]} stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
               <Tooltip
                 contentStyle={{
                   backgroundColor: '#ffffff',
@@ -89,7 +89,7 @@ export default function AttendanceChart({ weeklyData = [], subjectData = [] }) {
                 axisLine={false}
                 tickFormatter={(v) => v.length > 10 ? `${v.slice(0, 8)}...` : v} 
               />
-              <YAxis domain={[50, 100]} stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
+              <YAxis domain={[0, 100]} stroke="#94a3b8" fontSize={12} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
               <Tooltip
                 contentStyle={{
                   backgroundColor: '#ffffff',
